@@ -1,0 +1,12 @@
+plugins {
+    id 'lh.demo.java-common-conventions'
+}
+
+dependencies {
+    implementation project(":annotation-generate")
+    annotationProcessor project(":annotation-generate")
+
+    implementation group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.14.2'
+    annotationProcessor 'org.projectlombok:lombok:1.18.26'
+    compileOnly 'org.projectlombok:lombok:1.18.26'
+}

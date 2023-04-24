@@ -1,0 +1,5 @@
+rootProject.name = 'auto-generate-practice'
+include 'annotation-generate'
+include 'annotation-generate'
+include 'annotation-generate-test'
+
