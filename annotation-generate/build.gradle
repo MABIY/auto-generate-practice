@@ -3,4 +3,7 @@ plugins {
 }
 dependencies {
     implementation group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.14.2'
+    implementation 'com.github.spullara.mustache.java:compiler:0.9.10'
+    compileOnly 'org.projectlombok:lombok:1.18.26'
+    annotationProcessor 'org.projectlombok:lombok:1.18.26'
 }

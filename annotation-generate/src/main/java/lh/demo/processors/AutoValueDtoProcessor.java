@@ -1,12 +1,16 @@
 package lh.demo.processors;
 
 import com.fasterxml.jackson.annotation.JsonView;
+import com.github.mustachejava.DefaultMustacheFactory;
+import com.github.mustachejava.Mustache;
+import com.github.mustachejava.MustacheFactory;
 import com.google.auto.service.AutoService;
 import lh.demo.util.APUtils;
 
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.Element;
+import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.tools.JavaFileObject;
@@ -15,14 +19,15 @@ import java.io.PrintWriter;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static lh.demo.util.APUtils.getSimpleClassName;
+
 /**
  *
  * @author lh
  */
 @SupportedAnnotationTypes(
-        value = {
-            AutoValueDtoProcessor.LH_DEMO_ANNOTATIONS_AUTO_VALUE_DTO,
-            AutoValueDtoProcessor.COM_FASTERXML_JACKSON_ANNOTATION_JSON_VIEW
+        value = {AutoValueDtoProcessor.LH_DEMO_ANNOTATIONS_AUTO_VALUE_DTO
+            //            AutoValueDtoProcessor.COM_FASTERXML_JACKSON_ANNOTATION_JSON_VIEW
         })
 @SupportedSourceVersion(SourceVersion.RELEASE_17)
 @AutoService(Processor.class)
@@ -33,93 +38,62 @@ public class AutoValueDtoProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-        Optional<? extends TypeElement> autoValueDto = annotations.stream()
-                .filter(typeElement -> typeElement.toString().equals(LH_DEMO_ANNOTATIONS_AUTO_VALUE_DTO))
-                .findFirst();
-        Optional<? extends TypeElement> jsonView = annotations.stream()
-                .filter(typeElement -> typeElement.toString().equals(COM_FASTERXML_JACKSON_ANNOTATION_JSON_VIEW))
-                .findFirst();
-        autoValueDto.ifPresent(typeElement -> {
-            Set<? extends Element> elements = roundEnv.getElementsAnnotatedWith(typeElement);
-            Map<String, List<Element>> classElementPair = elements.stream()
-                    .collect(Collectors.groupingBy(element ->
-                            ((TypeElement) element).getQualifiedName().toString()));
-            Map<String, List<Element>> jsonViewClassElementPair = new HashMap<>();
-            if (jsonView.isPresent()) {
-                Set<? extends Element> jsonViewElements = roundEnv.getElementsAnnotatedWith(jsonView.get());
-                jsonViewClassElementPair = jsonViewElements.stream()
-                        .collect(Collectors.groupingBy(element -> ((TypeElement) element.getEnclosingElement())
-                                .getQualifiedName()
-                                .toString()));
-            }
+        TypeElement autoValueDtoAnnotation =
+                processingEnv.getElementUtils().getTypeElement(LH_DEMO_ANNOTATIONS_AUTO_VALUE_DTO);
+        Set<? extends Element> elements = roundEnv.getElementsAnnotatedWith(autoValueDtoAnnotation);
+        for (Element element : elements) {
+            if (element instanceof TypeElement typeElement) {
+                String packageName = APUtils.getPackageName(typeElement);
+                String classQualifiedName = typeElement.getQualifiedName().toString();
 
-            Set<String> qualifiedClassSet = classElementPair.keySet();
-            qualifiedClassSet.retainAll(jsonViewClassElementPair.keySet());
+                //                String simpleClassName = typeElement.getSimpleName().toString();
+                List<Element> fieldsWithJsonViewAnnotation =
+                        processingEnv.getElementUtils().getAllMembers(typeElement).stream()
+                                .filter(element1 -> element1.getKind() == ElementKind.FIELD)
+                                .filter(element1 -> element1.getAnnotationsByType(JsonView.class).length > 0)
+                                .collect(Collectors.toList());
 
-            Map<String, List<Element>> classAndField = new HashMap<>();
-            for (String qualifiedClass : qualifiedClassSet) {
-                jsonViewClassElementPair.get(qualifiedClass).forEach(element -> {
-                     APUtils.getTypeMirrorFromAnnotationValue(element.getAnnotation(JsonView.class)::value).stream().forEach(typeMirror -> {
-                         String name = typeMirror.toString().substring(typeMirror.toString().lastIndexOf('.')+1);
-                         String key = qualifiedClass + name;
-                         List<Element> fields = classAndField.getOrDefault(key, new ArrayList<>());
-                         fields.add(element);
-                         classAndField.put(key, fields);
-                     });
+                Map<String, Set<JavaClassScope.Field>> classFieldsPair = new HashMap<>();
+                fieldsWithJsonViewAnnotation.forEach(fieldElement -> {
+                    APUtils.getTypeMirrorFromAnnotationValue(fieldElement.getAnnotation(JsonView.class)::value)
+                            .forEach(typeMirror -> {
+                                String name = typeMirror
+                                        .toString()
+                                        .substring(typeMirror.toString().lastIndexOf('.') + 1);
+                                String key = classQualifiedName + name;
+                                Set<JavaClassScope.Field> fields = classFieldsPair.getOrDefault(key, new HashSet<>());
+                                fields.add(JavaClassScope.Field.builder()
+                                        .modifiers(fieldElement.getModifiers().stream()
+                                                .map(Modifier::toString)
+                                                .collect(Collectors.joining(" ")))
+                                        .type(fieldElement.asType().toString())
+                                        .name(fieldElement.getSimpleName().toString())
+                                        .build());
+                                classFieldsPair.put(key, fields);
+                            });
                 });
-            }
 
-            writeDto(classAndField);
 
-        });
+                for (Map.Entry<String, Set<JavaClassScope.Field>> stringSetEntry : classFieldsPair.entrySet()) {
 
-        return true;
-    }
+                    String qualifiedClassName = stringSetEntry.getKey();
+                    JavaClassScope classScope = new JavaClassScope(packageName, getSimpleClassName(qualifiedClassName));
+                    classScope.setFields(stringSetEntry.getValue());
 
-    private void writeDto(Map<String,List<Element>> classFieldsPair) {
-        classFieldsPair.forEach((classQualifiedName, fields) -> {
-            String packageName = null;
-            int lastDot = classQualifiedName.lastIndexOf('.');
-            if (lastDot > 0) {
-                packageName = classQualifiedName.substring(0, lastDot);
-            }
 
-            String simpleClassName = classQualifiedName.substring(lastDot + 1);
-
-            try {
-                JavaFileObject javaFile = processingEnv.getFiler()
-                        .createSourceFile(classQualifiedName);
-
-                try(PrintWriter out = new PrintWriter(javaFile.openWriter())){
-                    if(packageName !=null) {
-                        out.print("package ");
-                        out.print(packageName);
-                        out.println(";");
-                        out.println();
+                    MustacheFactory factory = new DefaultMustacheFactory();
+                    Mustache mustache = factory.compile("template/JavaClass.mustache");
+                    try {
+                        JavaFileObject javaFile = processingEnv.getFiler().createSourceFile(qualifiedClassName);
+                        try (PrintWriter out = new PrintWriter(javaFile.openWriter())) {
+                            mustache.execute(out, classScope);
+                        }
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
                     }
-
-                    //impoort
-                    out.println("import lombok.Data;");
-                    out.println();
-
-                    out.println("@Data");
-                    out.print("public class ");
-                    out.print(simpleClassName);
-                    out.print(" {");
-                    out.println();
-                    fields.forEach(s -> {
-                        out.print("  " + s.getModifiers().stream().map(Modifier::toString).collect(Collectors.joining(" ")));
-                        out.print(" " + s.asType().toString());
-                        out.println(" " + s +";");
-
-                    });
-                    out.println();
-                    out.print("}");
                 }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
             }
-
-        });
+        }
+        return true;
     }
 }

@@ -1,5 +1,7 @@
 package lh.demo.util;
 
+import javax.lang.model.element.PackageElement;
+import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.MirroredTypeException;
 import javax.lang.model.type.MirroredTypesException;
 import javax.lang.model.type.TypeMirror;
@@ -22,4 +24,13 @@ public class APUtils {
     return null;
   }
 
+    public static String getPackageName(TypeElement classElement) {
+        return ((PackageElement) classElement.getEnclosingElement())
+                .getQualifiedName()
+                .toString();
+    }
+
+    public static String getSimpleClassName(String qualifiedClassName) {
+        return qualifiedClassName.substring(qualifiedClassName.lastIndexOf(".") + 1);
+    }
 }
