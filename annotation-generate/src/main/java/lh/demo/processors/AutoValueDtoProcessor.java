@@ -1,25 +1,23 @@
 package lh.demo.processors;
 
 import com.fasterxml.jackson.annotation.JsonView;
-import com.github.mustachejava.DefaultMustacheFactory;
-import com.github.mustachejava.Mustache;
-import com.github.mustachejava.MustacheFactory;
 import com.google.auto.service.AutoService;
+import com.squareup.javapoet.*;
 import lh.demo.util.APUtils;
 
 import javax.annotation.processing.*;
 import javax.lang.model.SourceVersion;
-import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
-import javax.lang.model.element.Modifier;
-import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.*;
+import javax.lang.model.type.TypeMirror;
 import javax.tools.JavaFileObject;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static lh.demo.util.APUtils.getSimpleClassName;
+import static lh.demo.util.APUtils.*;
+import static lh.demo.util.StringUtils.getLastDelimiterValue;
+import static lh.demo.util.StringUtils.uppercaseFirstLetter;
 
 /**
  *
@@ -46,47 +44,92 @@ public class AutoValueDtoProcessor extends AbstractProcessor {
                 String packageName = APUtils.getPackageName(typeElement);
                 String classQualifiedName = typeElement.getQualifiedName().toString();
 
-                //                String simpleClassName = typeElement.getSimpleName().toString();
-                List<Element> fieldsWithJsonViewAnnotation =
+                Map<TypeMirror, Set<VariableElement>> annnotationVariblesPair =
                         processingEnv.getElementUtils().getAllMembers(typeElement).stream()
-                                .filter(element1 -> element1.getKind() == ElementKind.FIELD)
-                                .filter(element1 -> element1.getAnnotationsByType(JsonView.class).length > 0)
-                                .collect(Collectors.toList());
+                                .filter(member -> member.getKind() == ElementKind.FIELD)
+                                .filter(member -> member.getAnnotationsByType(JsonView.class).length > 0)
+                                .flatMap(member -> APUtils.getAnnotationValuesOrDefault(
+                                        member.getAnnotation(JsonView.class)::value, (TypeMirror) processingEnv
+                                                .getElementUtils()
+                                                .getTypeElement("lh.demo.annotations.Views.Value").asType())
+                                        .stream()
+                                        .collect(Collectors.toMap(typeMirror -> typeMirror, o -> {
+                                            Set<VariableElement> set = new HashSet<>();
+                                            set.add((VariableElement) member);
+                                            return set;
+                                        }))
+                                        .entrySet()
+                                        .stream())
+                                .collect(Collectors.toMap(
+                                        Map.Entry::getKey,
+                                        Map.Entry::getValue,
+                                        (variableElements, variableElements2) -> {
+                                            variableElements.addAll(variableElements2);
+                                            return variableElements;
+                                        }));
 
-                Map<String, Set<JavaClassScope.Field>> classFieldsPair = new HashMap<>();
-                fieldsWithJsonViewAnnotation.forEach(fieldElement -> {
-                    APUtils.getTypeMirrorFromAnnotationValue(fieldElement.getAnnotation(JsonView.class)::value)
-                            .forEach(typeMirror -> {
-                                String name = typeMirror
-                                        .toString()
-                                        .substring(typeMirror.toString().lastIndexOf('.') + 1);
-                                String key = classQualifiedName + name;
-                                Set<JavaClassScope.Field> fields = classFieldsPair.getOrDefault(key, new HashSet<>());
-                                fields.add(JavaClassScope.Field.builder()
-                                        .modifiers(fieldElement.getModifiers().stream()
-                                                .map(Modifier::toString)
-                                                .collect(Collectors.joining(" ")))
-                                        .type(fieldElement.asType().toString())
-                                        .name(fieldElement.getSimpleName().toString())
-                                        .build());
-                                classFieldsPair.put(key, fields);
-                            });
-                });
+                aggregationInterfaceExtendFields(annnotationVariblesPair);
+                Map<String,Set<FieldSpec>> typeMirrorSetMap = new HashMap<>();
+                for (Map.Entry<TypeMirror, Set<VariableElement>> typeMirrorSetEntry : annnotationVariblesPair.entrySet()) {
+                    typeMirrorSetMap.put(classQualifiedName + getLastDelimiterValue(typeMirrorSetEntry.getKey().toString(),'.'),typeMirrorSetEntry.getValue().stream().map(APUtils::convert).collect(Collectors.toSet()));
+                }
 
-
-                for (Map.Entry<String, Set<JavaClassScope.Field>> stringSetEntry : classFieldsPair.entrySet()) {
+                for (Map.Entry<String, Set<FieldSpec>> stringSetEntry : typeMirrorSetMap.entrySet()) {
 
                     String qualifiedClassName = stringSetEntry.getKey();
-                    JavaClassScope classScope = new JavaClassScope(packageName, getSimpleClassName(qualifiedClassName));
-                    classScope.setFields(stringSetEntry.getValue());
-
-
-                    MustacheFactory factory = new DefaultMustacheFactory();
-                    Mustache mustache = factory.compile("template/JavaClass.mustache");
                     try {
+                        String simpleClassName = getLastDelimiterValue(qualifiedClassName,'.');
+
+                        ClassName LombokDateAnnotation = ClassName.get("lombok", "Data");
+                        TypeSpec.Builder typeSpecBuilder = TypeSpec.classBuilder(simpleClassName)
+                                .addAnnotation(LombokDateAnnotation)
+                                .addModifiers(Modifier.PUBLIC);
+                        for (FieldSpec fieldSpec : stringSetEntry.getValue()) {
+                            typeSpecBuilder.addField(fieldSpec);
+                        }
+
+                        ClassName  className = ClassName.bestGuess(classQualifiedName);
+
+                        MethodSpec.Builder createMethodBuilder  = MethodSpec.methodBuilder("create")
+                                .addModifiers(Modifier.PUBLIC)
+                                .returns(className)
+                                .addStatement("$T entity = new $T()", className, className);
+                        for (FieldSpec fieldSpec : stringSetEntry.getValue()) {
+                            extracted(createMethodBuilder, fieldSpec);
+                        }
+                        createMethodBuilder.addStatement("return entity");
+                        typeSpecBuilder.addMethod(createMethodBuilder.build());
+
+                        MethodSpec.Builder assignMethodBuilder  = MethodSpec.methodBuilder("assign")
+                                .addModifiers(Modifier.PUBLIC)
+                                .returns(className)
+                                .addParameter(className,"entity");
+                        for (FieldSpec fieldSpec : stringSetEntry.getValue()) {
+                            assignMethodBuilder.addStatement("entity.set" + uppercaseFirstLetter(fieldSpec.name) + "(" + fieldSpec.name + ")");
+                        }
+                        assignMethodBuilder.addStatement("return entity");
+                        typeSpecBuilder.addMethod(assignMethodBuilder.build());
+
+                        MethodSpec.Builder patchMethodBuilder  = MethodSpec.methodBuilder("patch")
+                                .addModifiers(Modifier.PUBLIC)
+                                .returns(className)
+                                .addParameter(className,"entity");
+                        for (FieldSpec fieldSpec : stringSetEntry.getValue()) {
+                            if (fieldSpec.type.isPrimitive()){
+                                patchMethodBuilder.addStatement("entity.set" + uppercaseFirstLetter(fieldSpec.name) + "(" + fieldSpec.name + ")");
+                            } else  {
+                                patchMethodBuilder.beginControlFlow("if ("+ fieldSpec.name+" != null )");
+                                patchMethodBuilder.addStatement("entity.set" + uppercaseFirstLetter(fieldSpec.name) + "(" + fieldSpec.name + ")");
+                                patchMethodBuilder.endControlFlow();
+                            }
+                        }
+                        patchMethodBuilder.addStatement("return entity");
+                        typeSpecBuilder.addMethod(patchMethodBuilder.build());
+
                         JavaFileObject javaFile = processingEnv.getFiler().createSourceFile(qualifiedClassName);
                         try (PrintWriter out = new PrintWriter(javaFile.openWriter())) {
-                            mustache.execute(out, classScope);
+                            JavaFile.builder(packageName, typeSpecBuilder.build())
+                                    .build().writeTo(out);
                         }
                     } catch (IOException e) {
                         throw new RuntimeException(e);
@@ -95,5 +138,22 @@ public class AutoValueDtoProcessor extends AbstractProcessor {
             }
         }
         return true;
+    }
+
+    private void aggregationInterfaceExtendFields(Map<TypeMirror, Set<VariableElement>> annotationVariablesPair) {
+        Set<TypeMirror>  mirrors  =annotationVariablesPair.keySet();
+        for (TypeMirror mirror : mirrors) {
+            List<TypeMirror> extendsInterfaces = getAllInterfaces(mirror,processingEnv);
+            List<String> typMirrorsString = extendsInterfaces.stream().map(TypeMirror::toString).toList();
+            for (TypeMirror typeMirror : mirrors) {
+                if(!mirror.toString().equals(typeMirror.toString()) && typMirrorsString.contains(typeMirror.toString())) {
+                    annotationVariablesPair.get(mirror).addAll(annotationVariablesPair.get(typeMirror));
+                }
+            }
+        }
+    }
+
+    private static void extracted(MethodSpec.Builder createMethodBuilder, FieldSpec fieldSpec) {
+        createMethodBuilder.addStatement("entity.set" + uppercaseFirstLetter(fieldSpec.name) + "(" + fieldSpec.name + ")");
     }
 }
